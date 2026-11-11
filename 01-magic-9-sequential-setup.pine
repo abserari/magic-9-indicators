@@ -1,0 +1,114 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © blackcat1402
+// Source: https://www.tradingview.com/script/cGj67e4X-blackcat-L3-Magic-9-Sequential-Setup/
+// NOTE: transcribed from the TradingView public source view on 2026-11-11.
+// The original file opens with decorative ASCII art (omitted here); the
+// functional code below is complete.
+//@version=5
+indicator('[blackcat] L3 Magic-9 Sequential Setup', overlay=true, max_bars_back=4000, max_labels_count=500)
+// This is technically a Demark Sequential indicator
+// Function to get the first non-na value in a series
+get_first_non_na_value(values, length) =>
+    result = float(na)
+    if length >= 1
+        for i = 0 to length - 1
+            if na(result) or not na(values[i])
+                result := values[i]
+    result
+// Function to count consecutive occurrences of a condition
+count_consecutive_occurrences(condition, length) =>
+    count = 0
+    for i = 1 to length
+        if condition[i - 1]
+            count += 1
+    count
+// Function to check if a condition occurs within a given length
+check_condition_occurrence(condition, length) =>
+    occurrence = count_consecutive_occurrences(condition, length) != 0 ? 1 : 0
+    occurrence
+// Function to filter occurrences based on a lookback period
+filter_occurrences(condition, lookback_period) =>
+    output = 0.0
+    temp = 0
+    for i = lookback_period to 0
+        if temp > 0
+            output := 0.0
+            temp := temp[1] - 1
+        else
+            if not condition[i]
+                output := 0.0
+            else
+                output := 1.0
+                temp := lookback_period + 1
+    output_bool = output == 1 ? true : false
+    output_bool
+// Function to create labels with colors
+create_labels(close, bar_index, high, low, length_input) =>
+    // Define colors
+    color_green = color.new(color.lime, 0)
+    color_red = color.new(color.red, 0)
+    // Calculate high and low conditions
+    high_13 = count_consecutive_occurrences(close > get_first_non_na_value(close, 4), 13) == 13 and count_consecutive_occurrences(close > get_first_non_na_value(close, 4), 14) == 13
+    high_12 = count_consecutive_occurrences(close > get_first_non_na_value(close, 4), 12) == 12 and count_consecutive_occurrences(close > get_first_non_na_value(close, 4), 13) == 12
+    high_9 = count_consecutive_occurrences(close > get_first_non_na_value(close, 4), 9) == 9 and count_consecutive_occurrences(close > get_first_non_na_value(close, 4), 10) == 9
+    high_8 = count_consecutive_occurrences(close > get_first_non_na_value(close, 4), 8) == 8 and count_consecutive_occurrences(close > get_first_non_na_value(close, 4), 9) == 8
+    high_7 = count_consecutive_occurrences(close > get_first_non_na_value(close, 4), 7) == 7 and count_consecutive_occurrences(close > get_first_non_na_value(close, 4), 8) == 7
+    high_6 = count_consecutive_occurrences(close > get_first_non_na_value(close, 4), 6) == 6 and count_consecutive_occurrences(close > get_first_non_na_value(close, 4), 7) == 6
+    high_5 = count_consecutive_occurrences(close > get_first_non_na_value(close, 4), 5) == 5 and count_consecutive_occurrences(close > get_first_non_na_value(close, 4), 6) == 5
+    low_13 = count_consecutive_occurrences(close < get_first_non_na_value(close, 4), 13) == 13 and count_consecutive_occurrences(close < get_first_non_na_value(close, 4), 14) == 13
+    low_12 = count_consecutive_occurrences(close < get_first_non_na_value(close, 4), 12) == 12 and count_consecutive_occurrences(close < get_first_non_na_value(close, 4), 13) == 12
+    low_9 = count_consecutive_occurrences(close < get_first_non_na_value(close, 4), 9) == 9 and count_consecutive_occurrences(close < get_first_non_na_value(close, 4), 10) == 9
+    low_8 = count_consecutive_occurrences(close < get_first_non_na_value(close, 4), 8) == 8 and count_consecutive_occurrences(close < get_first_non_na_value(close, 4), 9) == 8
+    low_7 = count_consecutive_occurrences(close < get_first_non_na_value(close, 4), 7) == 7 and count_consecutive_occurrences(close < get_first_non_na_value(close, 4), 8) == 7
+    low_6 = count_consecutive_occurrences(close < get_first_non_na_value(close, 4), 6) == 6 and count_consecutive_occurrences(close < get_first_non_na_value(close, 4), 7) == 6
+    low_5 = count_consecutive_occurrences(close < get_first_non_na_value(close, 4), 5) == 5 and count_consecutive_occurrences(close < get_first_non_na_value(close, 4), 6) == 5
+    // Create labels with inverted colors
+    if high_5
+        label.new(bar_index, close, '5', color=color.new(color.lime, 100), textcolor=color.new(color.lime, 100), style=label.style_none, size=size.small)
+    if high_6
+        label.new(bar_index, close, '6', color=color.new(color.lime, 100), textcolor=color.new(color.lime, 100), style=label.style_none, size=size.small)
+    if high_7
+        label.new(bar_index, close, '7', color=color.new(color.lime, 100), textcolor=color.new(color.lime, 100), style=label.style_none, size=size.small)
+    if high_8
+        label.new(bar_index, close, '8', color=color.new(color.lime, 100), textcolor=color.new(color.lime, 100), style=label.style_none, size=size.small)
+    if high_12
+        label.new(bar_index, close, '12', color=color.new(color.lime, 100), textcolor=color.new(color.lime, 100), style=label.style_none, size=size.small)
+    if high_9
+        label.new(bar_index, close, '9\n▼', color=color.new(color.lime, 90), textcolor=color.new(color.lime, 0), style=label.style_label_down, size=size.small)
+    if high_13
+        label.new(bar_index, close, '13\n▼', color=color.new(color.lime, 90), textcolor=color.new(color.lime, 0), style=label.style_label_down, size=size.small)
+    if low_5
+        label.new(bar_index, close, '5', color=color.new(color.red, 100), textcolor=color.new(color.red, 100), style=label.style_none, size=size.small)
+    if low_6
+        label.new(bar_index, close, '6', color=color.new(color.red, 100), textcolor=color.new(color.red, 100), style=label.style_none, size=size.small)
+    if low_7
+        label.new(bar_index, close, '7', color=color.new(color.red, 100), textcolor=color.new(color.red, 100), style=label.style_none, size=size.small)
+    if low_8
+        label.new(bar_index, close, '8', color=color.new(color.red, 100), textcolor=color.new(color.red, 100), style=label.style_none, size=size.small)
+    if low_12
+        label.new(bar_index, close, '12', color=color.new(color.red, 100), textcolor=color.new(color.red, 100), style=label.style_none, size=size.small)
+    if low_9
+        label.new(bar_index, close, '▲\n9', color=color.new(color.red, 90), textcolor=color.new(color.red, 0), style=label.style_label_up, size=size.small)
+    if low_13
+        label.new(bar_index, close, '▲\n13', color=color.new(color.red, 90), textcolor=color.new(color.red, 0), style=label.style_label_up, size=size.small)
+    // Calculate signal
+    up_count = 0
+    down_count = 0
+    for i = 0 to length_input - 1
+        up_count += (nz(close[i]) > nz(close[i + length_input]) ? 1 : 0)
+        down_count += (nz(close[i]) < nz(close[i + length_input]) ? 1 : 0)
+    down_signal_index = down_count >= length_input + 1 ? 1 : up_count >= length_input + 1 ? -1 : 0
+    signal = down_signal_index > 0 or up_count > down_count ? 1 : down_signal_index < 0 or down_count > up_count ? -1 : 0
+    signal_color = signal > 0 ? color.lime : signal < 0 ? color.red : color.black
+    // Create final labels with inverted colors
+    labels = check_condition_occurrence(ta.crossunder(down_signal_index, 0), 5) and high_9 or check_condition_occurrence(ta.crossunder(down_signal_index, 0), 5) and low_9
+    labels := check_condition_occurrence(ta.crossunder(down_signal_index, 0), 5) and high_5 or check_condition_occurrence(ta.crossunder(down_signal_index, 0), 5) and low_5
+    labels := check_condition_occurrence(ta.crossunder(down_signal_index, 0), 5) and high_6 or check_condition_occurrence(ta.crossunder(down_signal_index, 0), 5) and low_6
+    labels := check_condition_occurrence(ta.crossunder(down_signal_index, 0), 5) and high_7 or check_condition_occurrence(ta.crossunder(down_signal_index, 0), 5) and low_7
+    labels := check_condition_occurrence(ta.crossunder(down_signal_index, 0), 5) and high_8 or check_condition_occurrence(ta.crossunder(down_signal_index, 0), 5) and low_8
+    labels := check_condition_occurrence(ta.crossunder(down_signal_index, 0), 5) and high_12 or check_condition_occurrence(ta.crossunder(down_signal_index, 0), 5) and low_12
+    labels := check_condition_occurrence(ta.crossunder(down_signal_index, 0), 5) and high_13 or check_condition_occurrence(ta.crossunder(down_signal_index, 0), 5) and low_13
+    [labels, signal_color]
+// Function to plot labels with colors
+[labels, signal_color] = create_labels(close, bar_index, high, low, 9)
+barcolor(signal_color)

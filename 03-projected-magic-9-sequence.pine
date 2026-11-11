@@ -1,0 +1,261 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © blackcat1402
+// Source: https://www.tradingview.com/script/xx21J50b-blackcat-L3-Projected-Magic-9-Sequence/
+// V2 — polished build: sequence engine preserved, trade layer / risk layer / alerts / dashboard added
+//@version=6
+indicator('[blackcat] L3 Projected Magic-9 Sequence', overlay = true, max_bars_back = 4000, max_labels_count = 500)
+
+// ---------------------------------------------------------------------------
+// 0. Group name constants (const string — required by input.* group/title args)
+// ---------------------------------------------------------------------------
+var string GRP_PROJ = 'Projection'
+var string GRP_SEQ = 'Magic-9 Sequence'
+var string GRP_SIG = 'Signals'
+var string GRP_RISK = 'Risk'
+var string GRP_VIS = 'Visuals'
+
+// ---------------------------------------------------------------------------
+// 1. Inputs
+// ---------------------------------------------------------------------------
+useAutoTf = input.bool(true, 'Auto Higher Timeframe', group = GRP_PROJ, tooltip = 'Derive the projection timeframe from the chart timeframe (original behaviour).')
+htfInp = input.timeframe('', 'Manual Projection Timeframe', group = GRP_PROJ, tooltip = 'Used when Auto Higher Timeframe is off. Leave empty to follow the chart timeframe.')
+noRepaintHtf = input.bool(false, 'Non-Repainting HTF Values', group = GRP_PROJ, tooltip = 'Read the last CLOSED higher-timeframe bar. Removes intra-bar updates of the projected levels.')
+showProj = input.bool(true, 'Show Projected Levels', group = GRP_PROJ)
+projTransp = input.int(70, 'Projection Transparency', minval = 0, maxval = 95, group = GRP_PROJ)
+
+refBars = input.int(4, 'Reference Offset (bars)', minval = 2, maxval = 20, group = GRP_SEQ, tooltip = 'A step counts when close is beyond the close of (offset - 1) bars earlier.')
+keyNumA = input.int(9, 'Key Sequence Number A', minval = 2, maxval = 99, group = GRP_SEQ)
+keyNumB = input.int(13, 'Key Sequence Number B', minval = 2, maxval = 99, group = GRP_SEQ)
+stepFrom = input.int(5, 'Intermediate Steps From', minval = 2, maxval = 99, group = GRP_SEQ, tooltip = 'Steps in this range are counted and labelled but never trade. Key numbers are always excluded.')
+stepTo = input.int(12, 'Intermediate Steps To', minval = 2, maxval = 99, group = GRP_SEQ)
+showSteps = input.bool(true, 'Show Intermediate Steps', group = GRP_SEQ)
+showKey = input.bool(true, 'Show Key Sequence Numbers', group = GRP_SEQ)
+labelSize = input.string('small', 'Label Size', options = ['tiny', 'small', 'normal', 'large'], group = GRP_SEQ)
+
+useProjGate = input.bool(true, 'Require Projected Level Touch', group = GRP_SIG, tooltip = 'Off = every Key Number completion trades, without needing the projected level to be reached.')
+useExclusivity = input.bool(true, 'Same-bar Entry/Exit Exclusivity', group = GRP_SIG)
+cooldownBars = input.int(3, 'Cooldown Bars', minval = 0, group = GRP_SIG, tooltip = 'Minimum spacing between two trade signals. 0 = off.')
+flipOnOpposite = input.bool(true, 'Flip On Opposite Signal', group = GRP_SIG, tooltip = 'On = an opposite entry closes and reverses the position. Off = it only closes the position.')
+
+useTPSL = input.bool(true, 'Show ATR Take Profit / Stop Loss', group = GRP_RISK)
+atrLen = input.int(14, 'ATR Length', minval = 1, group = GRP_RISK)
+slMult = input.float(2.0, 'Stop Loss (xATR)', minval = 0.5, step = 0.25, group = GRP_RISK)
+tpMult = input.float(3.0, 'Take Profit (xATR)', minval = 0.5, step = 0.25, group = GRP_RISK)
+maxHoldBars = input.int(0, 'Time Stop (bars)', minval = 0, group = GRP_RISK, tooltip = 'Exit after N closed bars in the position. 0 = off.')
+
+showBg = input.bool(true, 'Position Background', group = GRP_VIS)
+showDash = input.bool(true, 'Status Dashboard', group = GRP_VIS)
+
+// ---------------------------------------------------------------------------
+// 2. Helper functions
+// ---------------------------------------------------------------------------
+// First non-na value inside a lookback window (returns the oldest non-na entry)
+get_first_non_na_value(values, length) =>
+    result_value = float(na)
+    if length >= 1
+        for i = 0 to length - 1 by 1
+            if na(result_value) or not na(values[i])
+                result_value := values[i]
+                result_value
+    result_value
+
+// Map the chart timeframe to the projection timeframe
+select_auto_timeframe() =>
+    timeframe.isseconds ? '120' : timeframe.isminutes ? '1440' : timeframe.isdaily ? 'W' : timeframe.isweekly ? 'M' : timeframe.ismonthly and timeframe.multiplier < 3 ? '3M' : '12M'
+
+// ---------------------------------------------------------------------------
+// 3. Higher timeframe data feeding the projection
+// ---------------------------------------------------------------------------
+auto_timeframe = select_auto_timeframe()
+projTf = useAutoTf ? auto_timeframe : (htfInp == '' ? timeframe.period : htfInp)
+
+// One consolidated security call instead of four separate ones
+[symbol_high, symbol_low, symbol_open, symbol_close] = request.security(syminfo.tickerid, projTf, [high, low, open, close], barmerge.gaps_off, barmerge.lookahead_off)
+[nr_high, nr_low, nr_open, nr_close] = request.security(syminfo.tickerid, projTf, [high[1], low[1], open[1], close[1]], barmerge.gaps_off, barmerge.lookahead_on)
+
+htf_high = noRepaintHtf ? nr_high : symbol_high
+htf_low = noRepaintHtf ? nr_low : symbol_low
+htf_open = noRepaintHtf ? nr_open : symbol_open
+htf_close = noRepaintHtf ? nr_close : symbol_close
+
+// ---------------------------------------------------------------------------
+// 4. L3 projected high / low (algorithm unchanged from V1)
+// ---------------------------------------------------------------------------
+projected_high = htf_high
+projected_low = htf_low
+
+if not na(htf_close[1]) and not na(htf_high[1]) and not na(htf_low[1])
+    if htf_close[1] < htf_open[1]
+        projected_high := (htf_high[1] + 2 * htf_low[1] + htf_close[1]) / 2 - htf_low[1]
+        projected_low := (htf_high[1] + 2 * htf_low[1] + htf_close[1]) / 2 - htf_high[1]
+        projected_low
+    if htf_close[1] > htf_open[1]
+        projected_high := (2 * htf_high[1] + htf_low[1] + htf_close[1]) / 2 - htf_low[1]
+        projected_low := (2 * htf_high[1] + htf_low[1] + htf_close[1]) / 2 - htf_high[1]
+        projected_low
+    if htf_close[1] == htf_open[1]
+        projected_high := (htf_high[1] + htf_low[1] + 2 * htf_close[1]) / 2 - htf_low[1]
+        projected_low := (htf_high[1] + htf_low[1] + 2 * htf_close[1]) / 2 - htf_high[1]
+        projected_low
+
+plot_projected_high = plot(showProj ? projected_high : na, title = 'ProjHi', color = color.new(color.fuchsia, projTransp), style = plot.style_linebr)
+plot_projected_low = plot(showProj ? projected_low : na, title = 'ProjLo', color = color.new(color.fuchsia, projTransp), style = plot.style_linebr)
+fill(plot_projected_high, plot_projected_low, color = color.new(color.fuchsia, projTransp))
+
+// ---------------------------------------------------------------------------
+// 5. Magic-9 sequence engine
+//    V1: count(cond, N) == N and count(cond, N + 1) == N  ->  a run of exactly N steps
+//    V2: same predicate expressed as a run counter, so any N can be requested
+// ---------------------------------------------------------------------------
+seq_ref = get_first_non_na_value(close, refBars)
+step_up_raw = close > seq_ref
+step_down_raw = close < seq_ref
+
+var int run_up = 0
+var int run_down = 0
+run_up := step_up_raw ? nz(run_up[1], 0) + 1 : 0
+run_down := step_down_raw ? nz(run_down[1], 0) + 1 : 0
+
+// Key completions (identical trigger bars to V1 condition_h9 / condition_l9 etc.)
+seq_up_keyA = run_up == keyNumA
+seq_up_keyB = run_up == keyNumB
+seq_down_keyA = run_down == keyNumA
+seq_down_keyB = run_down == keyNumB
+
+
+// Intermediate steps (display only) — Key Numbers are never counted as steps
+step_up_hit = showSteps and run_up >= stepFrom and run_up <= stepTo and run_up != keyNumA and run_up != keyNumB
+step_down_hit = showSteps and run_down >= stepFrom and run_down <= stepTo and run_down != keyNumA and run_down != keyNumB
+step_hit_num = step_up_hit ? run_up : run_down
+
+// ---------------------------------------------------------------------------
+// 6. Trade layer — exhaustion reversals at the projected levels
+//    Upside run + ProjHi reached  ->  short (the V1 '9 / 13 ▼' marker)
+//    Downside run + ProjLo reached ->  long  (the V1 '9 / 13 ▲' marker)
+// ---------------------------------------------------------------------------
+touch_up = not na(projected_high) and high >= projected_high
+touch_down = not na(projected_low) and low <= projected_low
+
+raw_short_sig = (seq_up_keyA or seq_up_keyB) and (not useProjGate or touch_up)
+raw_long_sig = (seq_down_keyA or seq_down_keyB) and (not useProjGate or touch_down)
+
+// ---------------------------------------------------------------------------
+// 7. Signal governance — position state machine, exclusivity, cooldown
+// ---------------------------------------------------------------------------
+var int posState = 0
+var int lastSignalBar = na
+var int entryBar = na
+var float entryPrice = na
+
+cooldownOK = na(lastSignalBar) or bar_index - lastSignalBar > cooldownBars
+
+rawLongEntry = raw_long_sig and (flipOnOpposite ? posState <= 0 : posState == 0) and cooldownOK
+rawShortEntry = raw_short_sig and (flipOnOpposite ? posState >= 0 : posState == 0) and cooldownOK
+rawLongExit = posState == 1 and (raw_short_sig or (maxHoldBars > 0 and not na(entryBar) and bar_index - entryBar >= maxHoldBars))
+rawShortExit = posState == -1 and (raw_long_sig or (maxHoldBars > 0 and not na(entryBar) and bar_index - entryBar >= maxHoldBars))
+
+longExit = useExclusivity ? rawLongExit and not rawLongEntry and not rawShortEntry : rawLongExit
+shortExit = useExclusivity ? rawShortExit and not rawLongEntry and not rawShortEntry : rawShortExit
+longEntry = useExclusivity ? rawLongEntry and not longExit and not shortExit : rawLongEntry
+shortEntry = useExclusivity ? rawShortEntry and not longExit and not shortExit : rawShortEntry
+
+// Opposite signal handling: flip (default) or flat-only
+if longEntry
+    posState := 1
+    lastSignalBar := bar_index
+    entryBar := bar_index
+    entryPrice := close
+else if shortEntry
+    posState := -1
+    lastSignalBar := bar_index
+    entryBar := bar_index
+    entryPrice := close
+else if longExit or shortExit
+    posState := 0
+    lastSignalBar := bar_index
+    entryBar := na
+    entryPrice := na
+
+plot(posState, 'Position State', display = display.data_window)
+plot(run_up, 'Up Sequence Count', display = display.data_window)
+plot(run_down, 'Down Sequence Count', display = display.data_window)
+
+// ---------------------------------------------------------------------------
+// 8. Risk layer — ATR based take profit / stop loss reference levels
+// ---------------------------------------------------------------------------
+atrVal = ta.atr(atrLen)
+float slPrice = useTPSL and not na(entryPrice) ? entryPrice - posState * slMult * atrVal : na
+float tpPrice = useTPSL and not na(entryPrice) ? entryPrice + posState * tpMult * atrVal : na
+plot(slPrice, 'Stop Loss', color = color.new(color.red, 20), style = plot.style_linebr, linewidth = 1)
+plot(tpPrice, 'Take Profit', color = color.new(color.teal, 20), style = plot.style_linebr, linewidth = 1)
+
+// ---------------------------------------------------------------------------
+// 9. Visuals — colour semantics: green = long, red = short, fuchsia = projection
+// ---------------------------------------------------------------------------
+color_green = color.new(color.lime, 0)
+color_red = color.new(color.red, 0)
+color C_LONG = color.new(color.green, 0)
+color C_SHORT = color.new(color.red, 0)
+color C_EXIT = color.new(color.orange, 0)
+color C_BGLONG = color.new(color.green, 95)
+color C_BGSHORT = color.new(color.red, 95)
+
+size_lbl = labelSize == 'tiny' ? size.tiny : labelSize == 'normal' ? size.normal : labelSize == 'large' ? size.large : size.small
+
+// Intermediate sequence steps (5, 6, 7, 8, 12 ...) — count markers, no trade meaning
+if step_up_hit
+    label.new(bar_index, close, str.tostring(step_hit_num), color = color.new(color.lime, 100), textcolor = color_green, style = label.style_none, yloc = yloc.price, size = size_lbl)
+if step_down_hit
+    label.new(bar_index, close, str.tostring(step_hit_num), color = color.new(color.red, 100), textcolor = color_red, style = label.style_none, yloc = yloc.price, size = size_lbl)
+
+// Key sequence numbers (9 / 13) — plain marker when the projected level is not touched
+if showKey and seq_up_keyA
+    label.new(bar_index, close, str.tostring(keyNumA), color = color.new(color.lime, 100), textcolor = color_green, style = label.style_none, yloc = yloc.price, size = size_lbl)
+if showKey and seq_up_keyB
+    label.new(bar_index, close, str.tostring(keyNumB), color = color.new(color.lime, 100), textcolor = color_green, style = label.style_none, yloc = yloc.price, size = size_lbl)
+if showKey and seq_down_keyA
+    label.new(bar_index, close, str.tostring(keyNumA), color = color.new(color.red, 100), textcolor = color_red, style = label.style_none, yloc = yloc.price, size = size_lbl)
+if showKey and seq_down_keyB
+    label.new(bar_index, close, str.tostring(keyNumB), color = color.new(color.red, 100), textcolor = color_red, style = label.style_none, yloc = yloc.price, size = size_lbl)
+
+// Trade markers
+if longEntry
+    label.new(bar_index, low, str.tostring(seq_down_keyA ? keyNumA : keyNumB) + '\n▲', style = label.style_label_up, color = C_LONG, textcolor = color.white, size = size_lbl)
+if shortEntry
+    label.new(bar_index, high, str.tostring(seq_up_keyA ? keyNumA : keyNumB) + '\n▼', style = label.style_label_down, color = C_SHORT, textcolor = color.white, size = size_lbl)
+if longExit or shortExit
+    label.new(bar_index, longExit ? low : high, longExit ? 'XL' : 'XS', style = label.style_xcross, color = C_EXIT, textcolor = color.white, size = size.tiny)
+
+bg_state = posState == 1 ? C_BGLONG : posState == -1 ? C_BGSHORT : color(na)
+bgcolor(showBg ? bg_state : color(na))
+
+// Status dashboard
+var table dash = table.new(position.top_right, 2, 5, bgcolor = color.new(color.black, 60), border_width = 1, border_color = color.new(color.gray, 70))
+if showDash and barstate.islast
+    table.cell(dash, 0, 0, 'Position', text_color = color.silver, text_size = size.tiny)
+    table.cell(dash, 1, 0, posState == 1 ? 'LONG' : posState == -1 ? 'SHORT' : 'FLAT', text_color = posState == 1 ? color.lime : posState == -1 ? color.red : color.gray, text_size = size.tiny)
+    table.cell(dash, 0, 1, 'Sequence', text_color = color.silver, text_size = size.tiny)
+    table.cell(dash, 1, 1, '▲ ' + str.tostring(run_up) + '  /  ▼ ' + str.tostring(run_down), text_color = color.white, text_size = size.tiny)
+    table.cell(dash, 0, 2, 'ProjHi / ProjLo', text_color = color.silver, text_size = size.tiny)
+    table.cell(dash, 1, 2, na(projected_high) ? '—' : str.tostring(projected_high, format.mintick) + '  /  ' + str.tostring(projected_low, format.mintick), text_color = color.fuchsia, text_size = size.tiny)
+    table.cell(dash, 0, 3, 'TP / SL', text_color = color.silver, text_size = size.tiny)
+    table.cell(dash, 1, 3, na(tpPrice) ? '—' : str.tostring(tpPrice, format.mintick) + '  /  ' + str.tostring(slPrice, format.mintick), text_color = color.teal, text_size = size.tiny)
+    table.cell(dash, 0, 4, 'ATR / Cooldown', text_color = color.silver, text_size = size.tiny)
+    table.cell(dash, 1, 4, str.tostring(atrVal, format.mintick) + '  /  ' + str.tostring(math.max(0, cooldownBars - (na(lastSignalBar) ? cooldownBars : bar_index - lastSignalBar))), text_color = color.white, text_size = size.tiny)
+
+// ---------------------------------------------------------------------------
+// 10. Alerts — global scope, close-confirmed
+// ---------------------------------------------------------------------------
+if longEntry
+    alert('Magic-9 LONG @ ' + str.tostring(close, format.mintick) + ' | ProjLo ' + str.tostring(projected_low, format.mintick), alert.freq_once_per_bar_close)
+if shortEntry
+    alert('Magic-9 SHORT @ ' + str.tostring(close, format.mintick) + ' | ProjHi ' + str.tostring(projected_high, format.mintick), alert.freq_once_per_bar_close)
+if longExit
+    alert('Magic-9 LONG EXIT @ ' + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+if shortExit
+    alert('Magic-9 SHORT EXIT @ ' + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+
+alertcondition(longEntry, 'Magic-9 Long Entry', 'Downside sequence completed at ProjLo — long reversal')
+alertcondition(shortEntry, 'Magic-9 Short Entry', 'Upside sequence completed at ProjHi — short reversal')
+alertcondition(longExit, 'Magic-9 Long Exit', 'Long position exit')
+alertcondition(shortExit, 'Magic-9 Short Exit', 'Short position exit')

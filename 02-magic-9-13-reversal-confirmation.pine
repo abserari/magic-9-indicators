@@ -1,0 +1,195 @@
+//@version=6
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © blackcat1402
+// Source: https://www.tradingview.com/script/JQcD6UFh-blackcat-L3-Magic-9-13-with-Reversal-Points-Confirmation/
+indicator('[blackcat] L3 Magic-9/13 with Reversal Points Confirmation V2', overlay = true, max_bars_back = 4000, max_labels_count = 500)
+
+// ——————————————————————————————— Inputs ———————————————————————————————
+lengthInput     = input.int(9, 'Length', minval = 1, group = 'Reversal Confirmation', tooltip = 'Reversal confirmation window: number of consecutive same-direction closes required')
+lookbackInput   = input.int(4, 'Lookback Length', minval = 1, group = 'Reversal Confirmation', tooltip = 'Bars back each window member is compared with')
+showCountInput  = input.bool(true, 'Count Labels (5-8, 12)', group = 'Visuals')
+showMagicInput  = input.bool(true, 'Magic Labels (9 / 13)', group = 'Visuals')
+showTradeInput  = input.bool(true, 'B / S Signal Labels', group = 'Visuals')
+showRevInput    = input.bool(true, 'Reversal Point Markers', group = 'Visuals')
+showBarInput    = input.bool(true, 'Color Bars by Direction', group = 'Visuals')
+showTableInput  = input.bool(true, 'Show Status Table', group = 'Status Table')
+cornerInput     = input.string('Top Right', 'Table Position', options = ['Top Right', 'Top Left', 'Bottom Right', 'Bottom Left'], group = 'Status Table')
+sizeInput       = input.string('Small', 'Table Size', options = ['Tiny', 'Small', 'Normal', 'Large'], group = 'Status Table')
+
+// ——————————————————————————————— Functions ———————————————————————————————
+// Returns the oldest non-na value among values[0 .. length-1].
+// For a never-na series (e.g. close) this is exactly values[length-1],
+// i.e. the reference close 3 bars back when length = 4 (original behaviour).
+getRefValue(values, length) =>
+    result = float(na)
+    if length >= 1
+        for i = 0 to length - 1
+            if not na(values[i])
+                result := values[i]
+    result
+
+// Counts how many of the last `length` bars satisfy `condition`.
+countOccurrences(condition, length) =>
+    count = 0
+    for i = 1 to length
+        if condition[i - 1]
+            count += 1
+    count
+
+// True if `condition` occurred at least once within the last `length` bars.
+checkConditionOccurrence(condition, length) =>
+    countOccurrences(condition, length) != 0
+
+// Maps the corner input to a table position constant.
+tableCornerPos() =>
+    cornerInput == 'Top Right' ? position.top_right : cornerInput == 'Top Left' ? position.top_left : cornerInput == 'Bottom Right' ? position.bottom_right : position.bottom_left
+
+// Maps the size input to a size constant.
+tableSizeOpt() =>
+    sizeInput == 'Tiny' ? size.tiny : sizeInput == 'Small' ? size.small : sizeInput == 'Normal' ? size.normal : size.large
+
+// ——————————————————————————————— Calculations ———————————————————————————————
+// Magic-9/13 Sequential: consecutive closes vs the close 3 bars back.
+float refClose = getRefValue(close, 4)
+bool upBar     = close > refClose
+bool downBar   = close < refClose
+
+// Live streaks (equivalent to the original window-count pairs, but O(1)).
+var int upStreak   = 0
+var int downStreak = 0
+upStreak   := upBar ? upStreak + 1 : 0
+downStreak := downBar ? downStreak + 1 : 0
+
+bool high5  = upStreak == 5
+bool high6  = upStreak == 6
+bool high7  = upStreak == 7
+bool high8  = upStreak == 8
+bool high9  = upStreak == 9
+bool high12 = upStreak == 12
+bool high13 = upStreak == 13
+
+bool low5   = downStreak == 5
+bool low6   = downStreak == 6
+bool low7   = downStreak == 7
+bool low8   = downStreak == 8
+bool low9   = downStreak == 9
+bool low12  = downStreak == 12
+bool low13  = downStreak == 13
+
+// Reversal-point confirmation window (na-safe comparisons only).
+int upCount   = 0
+int downCount = 0
+for i = 0 to lengthInput - 1
+    float cNow = close[i]
+    float cRef = close[i + lookbackInput]
+    if not na(cNow) and not na(cRef)
+        upCount   += cNow > cRef ? 1 : 0
+        downCount += cNow < cRef ? 1 : 0
+
+// +1 = down-thrust completed (bullish reversal point); -1 = up-thrust completed (bearish reversal point).
+int directionalReversalPoint = downCount == lengthInput ? 1 : upCount == lengthInput ? -1 : 0
+
+// Stateful ta.* calls must be unconditional globals: v6 `and`/`or` short-circuit.
+bool crossUp   = ta.crossover(directionalReversalPoint, 0)
+bool crossDown = ta.crossunder(directionalReversalPoint, 0)
+
+int signal   = directionalReversalPoint > 0 or upCount > downCount ? 1 : directionalReversalPoint < 0 or downCount > upCount ? -1 : 0
+color drpColor = signal > 0 ? color.green : signal < 0 ? color.red : color.gray
+
+// Trade signals: 9-count + reversal-point confirmation, or a full 13-count.
+bool sellSignal = (checkConditionOccurrence(high9, 2) and crossDown) or high13
+bool buySignal  = (checkConditionOccurrence(low9, 2) and crossUp) or low13
+
+// ——————————————————————————————— Visuals ———————————————————————————————
+color colorGreen = color.new(color.lime, 0)
+color colorRed   = color.new(color.red, 0)
+
+if showCountInput and (high5 or low5)
+    label.new(bar_index, close, '5', color = color.new(color.lime, 100), textcolor = high5 ? colorGreen : colorRed, style = label.style_none, yloc = yloc.price, size = size.small)
+if showCountInput and (high6 or low6)
+    label.new(bar_index, close, '6', color = color.new(color.lime, 100), textcolor = high6 ? colorGreen : colorRed, style = label.style_none, yloc = yloc.price, size = size.small)
+if showCountInput and (high7 or low7)
+    label.new(bar_index, close, '7', color = color.new(color.lime, 100), textcolor = high7 ? colorGreen : colorRed, style = label.style_none, yloc = yloc.price, size = size.small)
+if showCountInput and (high8 or low8)
+    label.new(bar_index, close, '8', color = color.new(color.lime, 100), textcolor = high8 ? colorGreen : colorRed, style = label.style_none, yloc = yloc.price, size = size.small)
+if showCountInput and (high12 or low12)
+    label.new(bar_index, close, '12', color = color.new(color.lime, 100), textcolor = high12 ? colorGreen : colorRed, style = label.style_none, yloc = yloc.price, size = size.small)
+if showMagicInput and (high9 or low9)
+    label.new(bar_index, close, high9 ? '9\n▼' : '▲\n9', color = color.new(high9 ? color.lime : color.red, 90), textcolor = high9 ? colorGreen : colorRed, style = high9 ? label.style_label_down : label.style_label_up, yloc = yloc.price, size = size.small)
+if showMagicInput and (high13 or low13)
+    label.new(bar_index, close, high13 ? '13\n▼' : '▲\n13', color = color.new(high13 ? color.lime : color.red, 90), textcolor = high13 ? colorGreen : colorRed, style = high13 ? label.style_label_down : label.style_label_up, yloc = yloc.price, size = size.small)
+
+// Track the most recent trade signal for the status table.
+var int    lastSigBar = na
+var int    lastSigDir = 0
+var string lastSigTxt = '—'
+if buySignal
+    lastSigBar := bar_index
+    lastSigDir := 1
+    lastSigTxt := 'B · BUY'
+if sellSignal
+    lastSigBar := bar_index
+    lastSigDir := -1
+    lastSigTxt := 'S · SELL'
+
+if showTradeInput and sellSignal
+    label.new(bar_index, high, 'S', color = color.new(color.lime, 40), textcolor = color.white, style = label.style_label_down, yloc = yloc.price, size = size.small)
+if showTradeInput and buySignal
+    label.new(bar_index, low, 'B', color = color.new(color.red, 40), textcolor = color.white, style = label.style_label_up, yloc = yloc.price, size = size.small)
+
+barcolor(showBarInput ? drpColor : na)
+
+plotshape(showRevInput and directionalReversalPoint == 1, 'Bullish Reversal Point', style = shape.circle, location = location.belowbar, color = color.new(color.teal, 20), size = size.tiny)
+plotshape(showRevInput and directionalReversalPoint == -1, 'Bearish Reversal Point', style = shape.circle, location = location.abovebar, color = color.new(color.orange, 20), size = size.tiny)
+
+// ——————————————————————————————— Status table ———————————————————————————————
+var table statusTable = na
+if showTableInput and barstate.islast
+    if na(statusTable)
+        statusTable := table.new(tableCornerPos(), 2, 8, bgcolor = color.new(color.black, 20), border_color = color.new(color.gray, 60), border_width = 1)
+    table.set_position(statusTable, tableCornerPos())
+    color headBg   = color.new(color.gray, 40)
+    color greenTxt = color.lime
+    color redTxt   = color.red
+    color dimTxt   = color.silver
+
+    string streakTxt = str.tostring(upStreak) + ' / ' + str.tostring(downStreak)
+    color streakCol  = upStreak >= downStreak ? greenTxt : redTxt
+
+    string magicTxt = upStreak > downStreak ? '↑ ' + str.tostring(upStreak) : downStreak > upStreak ? '↓ ' + str.tostring(downStreak) : '—'
+    color magicCol  = upStreak > downStreak ? greenTxt : downStreak > upStreak ? redTxt : dimTxt
+
+    string windowTxt = str.tostring(upCount) + ' / ' + str.tostring(downCount)
+    color windowCol  = upCount > downCount ? greenTxt : upCount < downCount ? redTxt : dimTxt
+
+    string revTxt = directionalReversalPoint == 1 ? 'Bullish +1' : directionalReversalPoint == -1 ? 'Bearish -1' : '—'
+    color revCol  = directionalReversalPoint == 1 ? greenTxt : directionalReversalPoint == -1 ? redTxt : dimTxt
+
+    string biasTxt = signal > 0 ? 'Bullish' : signal < 0 ? 'Bearish' : 'Neutral'
+    color biasCol  = signal > 0 ? greenTxt : signal < 0 ? redTxt : dimTxt
+
+    string sigAgeTxt = na(lastSigBar) ? '—' : lastSigTxt + ' · ' + str.tostring(bar_index - lastSigBar) + ' bars ago'
+    color sigAgeCol  = lastSigDir == 1 ? redTxt : lastSigDir == -1 ? greenTxt : dimTxt
+
+    table.cell(statusTable, 0, 0, 'L3 Magic 9/13 Status', text_color = color.white, text_size = tableSizeOpt(), bgcolor = headBg)
+    table.cell(statusTable, 1, 0, timeframe.period, text_color = dimTxt, text_size = tableSizeOpt(), bgcolor = headBg)
+    table.cell(statusTable, 0, 1, 'Up / Down streak (vs 3 bars)', text_color = dimTxt, text_size = tableSizeOpt())
+    table.cell(statusTable, 1, 1, streakTxt, text_color = streakCol, text_size = tableSizeOpt())
+    table.cell(statusTable, 0, 2, 'Magic Count (9/13)', text_color = dimTxt, text_size = tableSizeOpt())
+    table.cell(statusTable, 1, 2, magicTxt, text_color = magicCol, text_size = tableSizeOpt())
+    table.cell(statusTable, 0, 3, 'Reversal window ↑ / ↓ (' + str.tostring(lengthInput) + '×' + str.tostring(lookbackInput) + ')', text_color = dimTxt, text_size = tableSizeOpt())
+    table.cell(statusTable, 1, 3, windowTxt, text_color = windowCol, text_size = tableSizeOpt())
+    table.cell(statusTable, 0, 4, 'Reversal Point', text_color = dimTxt, text_size = tableSizeOpt())
+    table.cell(statusTable, 1, 4, revTxt, text_color = revCol, text_size = tableSizeOpt())
+    table.cell(statusTable, 0, 5, 'Current Bias', text_color = dimTxt, text_size = tableSizeOpt())
+    table.cell(statusTable, 1, 5, biasTxt, text_color = biasCol, text_size = tableSizeOpt())
+    table.cell(statusTable, 0, 6, 'Last Signal', text_color = dimTxt, text_size = tableSizeOpt())
+    table.cell(statusTable, 1, 6, sigAgeTxt, text_color = sigAgeCol, text_size = tableSizeOpt())
+    table.cell(statusTable, 0, 7, 'Last Price', text_color = dimTxt, text_size = tableSizeOpt())
+    table.cell(statusTable, 1, 7, str.tostring(close, format.mintick), text_color = color.white, text_size = tableSizeOpt())
+
+// ——————————————————————————————— Alerts ———————————————————————————————
+alertcondition(buySignal, 'L3 Magic Buy Signal (B)', 'L3 Magic 9/13: Buy signal (B) on {{ticker}} {{interval}}')
+alertcondition(sellSignal, 'L3 Magic Sell Signal (S)', 'L3 Magic 9/13: Sell signal (S) on {{ticker}} {{interval}}')
+alertcondition(directionalReversalPoint == 1, 'Bullish Reversal Point', 'L3 Magic 9/13: Bullish reversal point (+1) on {{ticker}} {{interval}}')
+alertcondition(directionalReversalPoint == -1, 'Bearish Reversal Point', 'L3 Magic 9/13: Bearish reversal point (-1) on {{ticker}} {{interval}}')

@@ -1,0 +1,281 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © blackcat1402
+// Source: https://www.tradingview.com/script/tDzRDIeU-blackcat-L3-Magic-9-Sequential-MACD/
+// V2 — polished with pine-polisher: signal governance (state machine / edge / cooldown),
+//      explicit exits, ATR TP-SL, re-entry, alerts, dashboard. All new modules are switchable.
+//@version=6
+indicator('[blackcat] L3 Magic-9 Sequential MACD', overlay = false, max_bars_back = 4000, max_labels_count = 500)
+
+// ── Input groups (const literals) ────────────────────────────────────────────
+var string GRP_MACD  = "MACD"
+var string GRP_SEQ   = "Magic-9 Sequence"
+var string GRP_GOV   = "Signal Governance"
+var string GRP_EXIT  = "Exit / Risk"
+var string GRP_RE    = "Re-entry"
+var string GRP_VIS   = "Visual"
+
+// ── Inputs ────────────────────────────────────────────────────────────────────
+fast_length   = input.int(12, title = 'MACD Fast Length', minval = 1, group = GRP_MACD)
+slow_length   = input.int(26, title = 'MACD Slow Length', minval = 2, group = GRP_MACD)
+signal_length = input.int(9,  title = 'MACD Signal Length', minval = 1, group = GRP_MACD)
+
+refLookback = input.int(4,  title = 'Streak Reference Lookback', minval = 1, maxval = 20, group = GRP_SEQ, tooltip = 'Bars used to locate the first non-NA MACD reference for streak counting (V1 hard-coded 4).')
+seq1        = input.int(5,  title = 'Sequence Milestone 1', minval = 1, group = GRP_SEQ)
+seq2        = input.int(6,  title = 'Sequence Milestone 2 (Buy/Short trigger)', minval = 1, group = GRP_SEQ)
+seq3        = input.int(7,  title = 'Sequence Milestone 3', minval = 1, group = GRP_SEQ)
+seq4        = input.int(8,  title = 'Sequence Milestone 4', minval = 1, group = GRP_SEQ)
+seq5        = input.int(9,  title = 'Sequence Milestone 5 (Buy/Short trigger)', minval = 1, group = GRP_SEQ)
+seq6        = input.int(12, title = 'Sequence Milestone 6', minval = 1, group = GRP_SEQ)
+seq7        = input.int(13, title = 'Sequence Milestone 7 (break-end trigger)', minval = 1, group = GRP_SEQ)
+
+useLegacySignals = input.bool(false, title = 'Legacy V1 Signals (per-bar level)', group = GRP_GOV, tooltip = 'ON = V1 raw behavior: signals repeat on every bar of an ongoing streak. OFF = edge-triggered streak-end signals.')
+useExclusivity   = input.bool(true,  title = 'Same-bar Entry/Exit Exclusivity', group = GRP_GOV)
+cooldownBars     = input.int(3, title = 'Cooldown Bars', minval = 0, group = GRP_GOV, tooltip = 'Minimum spacing between signals. 0 = disabled.')
+
+useCrossExit = input.bool(true, title = 'Exit on MACD / Signal Cross', group = GRP_EXIT, tooltip = 'Explicit exit when the MACD line crosses back through the signal line.')
+useATR       = input.bool(true, title = 'ATR TP/SL Reference Levels', group = GRP_EXIT)
+atrLen = input.int(14,    title = 'ATR Length', minval = 1, group = GRP_EXIT)
+slMult = input.float(2.0, title = 'Stop Loss (xATR)', minval = 0.5, step = 0.25, group = GRP_EXIT)
+tpMult = input.float(3.0, title = 'Take Profit (xATR)', minval = 0.5, step = 0.25, group = GRP_EXIT)
+
+useReentry = input.bool(false, title = 'Enable Re-entry (RL/RS)', group = GRP_RE, tooltip = 'After an exit, re-enter when the MACD line breaks the anchor set around the exit bar.')
+reentryWin = input.int(3, title = 'Anchor Window (bars around exit)', minval = 1, maxval = 20, group = GRP_RE)
+
+showSeqLabels = input.bool(true, title = 'Sequence Milestone Labels', group = GRP_VIS)
+showSigLabels = input.bool(true, title = 'Entry / Exit Labels', group = GRP_VIS)
+showBg        = input.bool(true, title = 'Position Background Color', group = GRP_VIS)
+showDash      = input.bool(true, title = 'Show Dashboard', group = GRP_VIS)
+
+// ── Color semantics (green=long, red=short, orange=exit, teal/maroon=re-entry)
+color C_LONG    = color.new(color.green, 90)
+color C_SHORT   = color.new(color.red, 90)
+color C_EXIT    = color.new(color.orange, 0)
+color C_SEQ_UP  = color.new(color.lime, 100)
+color C_SEQ_DN  = color.new(color.red, 100)
+color C_SEQTXT_UP = color.new(color.lime, 0)
+color C_SEQTXT_DN = color.new(color.red, 0)
+color C_BGLONG  = color.new(color.green, 95)
+color C_BGSHORT = color.new(color.red, 95)
+
+// ── Helper functions (V1 core, preserved) ─────────────────────────────────────
+// Function to get the first non-na value in a series
+get_first_non_na_value(values, length) =>
+    result = float(na)
+    if length >= 1
+        for i = 0 to length - 1 by 1
+            if na(result) or not na(values[i])
+                result := values[i]
+    result
+
+
+// ── MACD core (V1, preserved) ─────────────────────────────────────────────────
+[macd_line, signal_line, histogram] = ta.macd(close, fast_length, slow_length, signal_length)
+
+// Plot MACD line and signal line
+plot1 = plot(macd_line, color = color.white, linewidth = 2, title = 'MACD Line')
+plot2 = plot(signal_line, color = color.yellow, linewidth = 2, title = 'Signal Line')
+fill(plot1, plot2, color = macd_line > signal_line ? color.new(color.yellow, 60) : color.new(color.fuchsia, 60))
+
+// Define MACD histogram (V1, preserved)
+difference = histogram
+enhanced_histogram = difference * 2
+positive_histogram = math.max(0, enhanced_histogram)
+negative_histogram = math.min(0, enhanced_histogram)
+current_histogram = enhanced_histogram[0]
+previous_histogram = enhanced_histogram[1]
+plot_color = enhanced_histogram > 0 ? current_histogram > previous_histogram ? color.new(color.red, 80) : color.new(color.blue, 80) : current_histogram < previous_histogram ? color.new(color.lime, 80) : color.new(color.yellow, 80)
+
+// Plot MACD histogram
+plot(positive_histogram, title = 'Positive Histogram', color = plot_color, style = plot.style_columns, linewidth = 3)
+plot(negative_histogram, title = 'Negative Histogram', color = plot_color, style = plot.style_columns, linewidth = 3)
+plot(enhanced_histogram, title = 'Enhanced Histogram', color = plot_color, style = plot.style_line, linewidth = 3)
+hline(0)
+
+// ── Magic-9 Sequential streaks (O(1) run-length counters) ─────────────────────
+// V1 re-counted the whole window per line via count_true_values (O(N) per call,
+// ~20 nested loops per bar). V2 keeps identical semantics with two run-length
+// counters: upLen/dnLen = consecutive bars (ending now) above/below refVal.
+refVal = get_first_non_na_value(macd_line, refLookback)
+
+var int upLen = 0
+var int dnLen = 0
+upLen := not na(refVal) and macd_line > refVal  and macd_line[1] > refVal[1] ? upLen[1] + 1 : not na(refVal) and macd_line > refVal ? 1 : 0
+dnLen := not na(refVal) and macd_line < refVal  and macd_line[1] < refVal[1] ? dnLen[1] + 1 : not na(refVal) and macd_line < refVal ? 1 : 0
+
+streak_up(N) =>
+    upLen >= N
+
+streak_down(N) =>
+    dnLen >= N
+
+seqLens = array.from(seq1, seq2, seq3, seq4, seq5, seq6, seq7)
+seqMax  = math.max(seq1, seq2, seq3, seq4, seq5, seq6, seq7)
+
+// V1 level semantics (kept for the legacy switch): streak ongoing on this bar.
+high_6 = streak_up(seq2)
+low_6  = streak_down(seq2)
+high_9 = streak_up(seq5)
+low_9  = streak_down(seq5)
+high_13 = streak_up(seq7)
+low_13  = streak_down(seq7)
+
+// ── Signal engine ─────────────────────────────────────────────────────────────
+// V2 default: streak-END edge semantics — a streak of at least the trigger
+// length has just broken on this bar (V1 already used this shape via low_13[1]).
+streakEndUp(N) =>
+    upLen < N and upLen[1] >= N
+
+streakEndDown(N) =>
+    dnLen < N and dnLen[1] >= N
+
+buyRaw  = useLegacySignals ? low_6 or low_9 or low_13[1] : streakEndDown(seq2) or streakEndDown(seq5) or streakEndDown(seq7)
+sellRaw = useLegacySignals ? high_6 or high_9 or high_13[1] : streakEndUp(seq2) or streakEndUp(seq5) or streakEndUp(seq7)
+
+// Explicit exits (W2): MACD line crossing back through the signal line.
+// ta.* computed globally every bar (consistency), consumed by the switch below.
+crossUnderRaw = ta.crossunder(macd_line, signal_line)
+crossOverRaw  = ta.crossover(macd_line, signal_line)
+longExitCond  = useCrossExit and crossUnderRaw
+shortExitCond = useCrossExit and crossOverRaw
+
+// Re-entry anchors (S4): captured reentryWin bars after the exit bar.
+var float exitHiAnchor = na
+var float exitLoAnchor = na
+var bool  reentryArmed = false
+
+// ── State machine (S1) + cooldown (S3) + same-bar exclusivity ─────────────────
+var int   posState      = 0
+var int   lastSignalBar = na
+var float entryPrice    = na
+var int   entryDir      = 0
+var int   exitAge       = na
+var string lastSigTxt   = '—'
+
+cooldownOK = na(lastSignalBar) or bar_index - lastSignalBar > cooldownBars
+
+rawLongEntry  = buyRaw  and posState <= 0 and cooldownOK
+rawShortEntry = sellRaw and posState >= 0 and cooldownOK
+rawLongExit   = (longExitCond or sellRaw)  and posState == 1
+rawShortExit  = (shortExitCond or buyRaw)  and posState == -1
+
+longExit   = useExclusivity ? rawLongExit  and not rawLongEntry and not rawShortEntry : rawLongExit
+shortExit  = useExclusivity ? rawShortExit and not rawLongEntry and not rawShortEntry : rawShortExit
+longEntry  = useExclusivity ? rawLongEntry and not longExit and not shortExit : rawLongEntry
+shortEntry = useExclusivity ? rawShortEntry and not longExit and not shortExit : rawShortEntry
+
+RL = false
+RS = false
+// ta.* hoisted to global scope for per-bar consistency; consumed conditionally below.
+hiAnchorSeries = ta.highest(macd_line, reentryWin + 1)[reentryWin]
+loAnchorSeries = ta.lowest(macd_line, reentryWin + 1)[reentryWin]
+rlRaw = ta.crossover(macd_line, nz(exitHiAnchor, 1000000000))
+rsRaw = ta.crossunder(macd_line, nz(exitLoAnchor, -1000000000))
+if not na(exitAge) and exitAge == reentryWin
+    exitHiAnchor := na
+    exitLoAnchor := na
+// Bars elapsed since the exit bar; stays `na` until the first exit happens.
+// FIX: `na(exitAge) + 1` is a bool+int expression that never reads the current
+// value (na -> 2, otherwise -> 1), so the counter was frozen and the anchor
+// window could never elapse. Increment only when the counter is live.
+exitAge := na(exitAge) ? na : exitAge + 1
+if longExit or shortExit
+    exitAge := 0
+    reentryArmed := true
+// Capture the anchor exactly once, on the first bar past the anchor window
+// (`>` re-captured a rolling window on every subsequent bar).
+if not na(exitAge) and exitAge == reentryWin + 1 and reentryArmed
+    exitHiAnchor := hiAnchorSeries
+    exitLoAnchor := loAnchorSeries
+if useReentry and reentryArmed and not na(exitHiAnchor) and not na(exitLoAnchor)
+    RL := rlRaw
+    RS := rsRaw
+
+longEntryFinal  = longEntry  or RL
+shortEntryFinal = shortEntry or RS
+
+if longEntryFinal or shortEntryFinal or longExit or shortExit
+    lastSignalBar := bar_index
+
+if longEntryFinal
+    posState := 1
+    entryPrice := close
+    entryDir := 1
+    reentryArmed := false
+    lastSigTxt := RL ? 'RL' : 'BUY'
+else if shortEntryFinal
+    posState := -1
+    entryPrice := close
+    entryDir := -1
+    reentryArmed := false
+    lastSigTxt := RS ? 'RS' : 'SELL'
+else if longExit or shortExit
+    posState := 0
+    entryPrice := na
+    entryDir := 0
+    lastSigTxt := longExit ? 'XL' : 'XS'
+
+// ── ATR TP/SL reference levels (S7, price-based, data window) ─────────────────
+atrVal = ta.atr(atrLen)
+float slPrice = useATR and posState != 0 and not na(entryPrice) ? entryPrice - entryDir * slMult * atrVal : na
+float tpPrice = useATR and posState != 0 and not na(entryPrice) ? entryPrice + entryDir * tpMult * atrVal : na
+plot(slPrice, title = 'Stop Loss (price)', color = color.red, style = plot.style_linebr, display = display.data_window)
+plot(tpPrice, title = 'Take Profit (price)', color = color.teal, style = plot.style_linebr, display = display.data_window)
+plot(posState, title = 'Position State (-1/0/1)', display = display.data_window)
+
+// ── Visuals ───────────────────────────────────────────────────────────────────
+// Sequence milestone labels: edge-triggered — each milestone fires once when the
+// streak first reaches that length (V1 re-drew them on every bar of the streak).
+if showSeqLabels and not na(refVal)
+    for k = 0 to 6 by 1
+        L = array.get(seqLens, k)
+        if upLen == L
+            label.new(bar_index, macd_line, str.tostring(L), color = C_SEQ_UP, textcolor = C_SEQTXT_UP, style = label.style_none, yloc = yloc.price, size = size.small)
+        if dnLen == L
+            label.new(bar_index, macd_line, str.tostring(L), color = C_SEQ_DN, textcolor = C_SEQTXT_DN, style = label.style_none, yloc = yloc.price, size = size.small)
+
+// Entry / exit labels (V1 style preserved, governed by the state machine)
+if showSigLabels
+    if longEntryFinal or shortEntryFinal
+        isRL = RL
+        label.new(bar_index, macd_line, longEntryFinal ? (isRL ? 'RL' : 'Buy') : (RS ? 'RS' : 'Sell'), color = longEntryFinal ? C_LONG : C_SHORT, textcolor = color.white, style = longEntryFinal ? label.style_label_up : label.style_label_down, yloc = yloc.price, size = size.small)
+    if longExit or shortExit
+        label.new(bar_index, macd_line, longExit ? 'XL' : 'XS', color = C_EXIT, textcolor = color.white, style = label.style_xcross, yloc = yloc.price, size = size.tiny)
+
+bgcolor(showBg ? posState == 1 ? C_BGLONG : posState == -1 ? C_BGSHORT : color(na) : color(na))
+
+var table dash = table.new(position.top_right, 2, 5, bgcolor = color.new(color.black, 60), border_width = 1, border_color = color.new(color.gray, 60))
+if showDash and barstate.islast
+    posTxt = posState == 1 ? 'LONG' : posState == -1 ? 'SHORT' : 'FLAT'
+    posCol = posState == 1 ? color.new(color.lime, 0) : posState == -1 ? color.new(color.red, 0) : color.new(color.gray, 0)
+    table.cell(dash, 0, 0, 'Position', text_color = color.new(color.gray, 0), text_size = size.tiny)
+    table.cell(dash, 1, 0, posTxt, text_color = posCol, text_size = size.tiny)
+    table.cell(dash, 0, 1, 'Last Signal', text_color = color.new(color.gray, 0), text_size = size.tiny)
+    table.cell(dash, 1, 1, lastSigTxt, text_color = color.white, text_size = size.tiny)
+    table.cell(dash, 0, 2, 'ATR', text_color = color.new(color.gray, 0), text_size = size.tiny)
+    table.cell(dash, 1, 2, useATR ? str.tostring(atrVal, format.mintick) : 'off', text_color = color.white, text_size = size.tiny)
+    table.cell(dash, 0, 3, 'SL / TP (price)', text_color = color.new(color.gray, 0), text_size = size.tiny)
+    table.cell(dash, 1, 3, useATR and posState != 0 ? str.tostring(slPrice, format.mintick) + ' / ' + str.tostring(tpPrice, format.mintick) : '—', text_color = color.white, text_size = size.tiny)
+    cdLeft = na(lastSignalBar) ? 0 : math.max(0, cooldownBars - (bar_index - lastSignalBar))
+    table.cell(dash, 0, 4, 'Cooldown Left', text_color = color.new(color.gray, 0), text_size = size.tiny)
+    table.cell(dash, 1, 4, str.tostring(cdLeft), text_color = color.white, text_size = size.tiny)
+
+// ── Alerts (S6: alertcondition global scope; alert() once per bar close) ─────
+alertcondition(longEntry,  title = 'Long Entry',  message = 'Magic-9 MACD long entry @ {{close}}')
+alertcondition(shortEntry, title = 'Short Entry', message = 'Magic-9 MACD short entry @ {{close}}')
+alertcondition(longExit,   title = 'Long Exit',   message = 'Magic-9 MACD long exit @ {{close}}')
+alertcondition(shortExit,  title = 'Short Exit',  message = 'Magic-9 MACD short exit @ {{close}}')
+alertcondition(RL,         title = 'Re-entry Long',  message = 'Magic-9 MACD re-entry long @ {{close}}')
+alertcondition(RS,         title = 'Re-entry Short', message = 'Magic-9 MACD re-entry short @ {{close}}')
+
+if longEntry
+    alert('Magic-9 MACD LONG entry @ ' + str.tostring(close, format.mintick) + (useATR ? ' | SL ' + str.tostring(slPrice, format.mintick) + ' | TP ' + str.tostring(tpPrice, format.mintick) : ''), alert.freq_once_per_bar_close)
+if shortEntry
+    alert('Magic-9 MACD SHORT entry @ ' + str.tostring(close, format.mintick) + (useATR ? ' | SL ' + str.tostring(slPrice, format.mintick) + ' | TP ' + str.tostring(tpPrice, format.mintick) : ''), alert.freq_once_per_bar_close)
+if longExit
+    alert('Magic-9 MACD LONG exit @ ' + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+if shortExit
+    alert('Magic-9 MACD SHORT exit @ ' + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+if RL
+    alert('Magic-9 MACD RE-ENTRY LONG @ ' + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+if RS
+    alert('Magic-9 MACD RE-ENTRY SHORT @ ' + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)

@@ -1,0 +1,257 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © blackcat1402
+// Source: https://www.tradingview.com/script/31xvShhe-blackcat-L3-Magic-9-MACD-Setup/
+// V2.1 — polished with pine-polisher. From 'L3 Magic-9 MACD Setup': sequence engine rewritten to run counters, HTF filter, re-entry anchors, signal governance, ATR TP/SL, dashboard, alerts.
+//@version=6
+indicator('L3 Magic-9 MACD Setup', overlay = false, max_bars_back = 4000, max_labels_count = 500)
+
+// ── Group names (const literals) ──
+var string GRP_MACD = 'MACD'
+var string GRP_SEQ = 'MACD Sequential'
+var string GRP_SIG = 'Signal Governance'
+var string GRP_EXIT = 'Exit'
+var string GRP_RE = 'Re-entry (RL/RS)'
+var string GRP_HTF = 'Higher Timeframe'
+var string GRP_RSK = 'Risk (ATR TP/SL)'
+
+// ── Inputs ──
+showHisto = input.bool(true, title = ' Show MACD Histogram (x2)', group = GRP_MACD)
+fastInp = input.int(12, title = 'MACD Fast Length', minval = 1, group = GRP_MACD)
+slowInp = input.int(26, title = 'MACD Slow Length', minval = 2, group = GRP_MACD)
+signalInp = input.int(9, title = 'MACD Signal Length', minval = 1, group = GRP_MACD)
+presetInp = input.string('Classic (5-13)', title = 'Sequence Preset', options = ['Classic (5-13)', '5-13 Classic Custom', 'Custom (incl 3-5)'], group = GRP_SEQ, tooltip = "Classic counts 5..13 and only trades at 9/13 completions; '3-5' adds extra 3 & 5 triggers via seqHitA.")
+seqSigInp = input.int(9, title = 'Signal Sequence (9)', minval = 1, maxval = 50, group = GRP_SEQ)
+seqExtInp = input.int(13, title = 'Extreme Sequence (13)', minval = 1, maxval = 50, group = GRP_SEQ)
+lengthInp = input.int(4, title = 'Length (MACD Setup Window)', minval = 1, maxval = 20, group = GRP_SEQ, tooltip = 'MACD values window for confirming momentum direction. V1 hard-coded to 4.')
+winSigInp = input.int(5, title = 'Signal Window', minval = 1, maxval = 50, group = GRP_SIG, tooltip = 'How many bars the 9-setup confirmation stays valid.')
+winExtInp = input.int(9, title = 'Extreme Window', minval = 1, maxval = 50, group = GRP_SIG, tooltip = 'How many bars the 13-setup confirmation stays valid.')
+winAnyInp = input.int(3, title = 'Any-Sequence Window', minval = 1, maxval = 50, group = GRP_SIG, tooltip = 'How many bars the Any-Sequence confirmation stays valid.')
+useEdge = input.bool(true, title = 'Edge-Triggered Entries', group = GRP_SIG, tooltip = 'OFF = every bar of an ongoing streak repeats the signal.')
+useExclusivity = input.bool(true, title = 'Same-bar Entry/Exit Exclusivity', group = GRP_SIG, tooltip = 'If entry and exit fire on the same bar, exit wins.')
+cooldownBars = input.int(3, title = 'Cooldown Bars', minval = 0, maxval = 100, group = GRP_SIG, tooltip = 'Minimum spacing between signals. 0 = off.')
+useCrossExit = input.bool(true, title = 'Exit on MACD / Signal Cross', group = GRP_EXIT, tooltip = 'Explicit exit when the MACD line crosses back through the signal line.')
+useExitOnFlip = input.bool(true, title = 'Exit on Opposite Magic-9 Setup Cross', group = GRP_EXIT, tooltip = 'Explicit exit when an opposite Magic-9 Setup cross occurs.')
+useReentry = input.bool(false, title = 'Enable Re-entry (RL/RS)', group = GRP_RE, tooltip = 'After an exit, re-enter from any position when MACD lines cross the RL/RS anchor levels.')
+reentryWin = input.int(3, title = 'Anchor Window Around Exit Bar', minval = 1, maxval = 20, group = GRP_RE, tooltip = 'Re-entry anchors: ta.highest(macdLine, Win) around exit bar.')
+useHTFFilter = input.bool(false, title = 'Enable HTF Filter', group = GRP_HTF)
+htfTf = input.timeframe('240', title = 'HTF Timeframe', group = GRP_HTF)
+useTPSL = input.bool(true, title = 'Show ATR TP/SL Levels', group = GRP_RSK)
+atrLen = input.int(14, title = 'ATR Length', minval = 1, group = GRP_RSK)
+slMult = input.float(2.0, title = 'Stop Loss (xATR)', minval = 0.5, step = 0.25, group = GRP_RSK)
+tpMult = input.float(3.0, title = 'Take Profit (xATR)', minval = 0.5, step = 0.25, group = GRP_RSK)
+showDash = input.bool(true, title = 'Show Dashboard', group = GRP_RSK)
+
+// ── Colors ──
+color C_LONG = color.new(color.green, 90)
+color C_SHORT = color.new(color.red, 90)
+color C_EXIT = color.new(color.orange, 0)
+color C_REL = color.new(color.teal, 0)
+color C_RES = color.new(color.maroon, 0)
+color C_BGLONG = color.new(color.green, 95)
+color C_BGSHORT = color.new(color.red, 95)
+
+// ── MACD core ──
+[macdLine, signalLine, hist] = ta.macd(close, fastInp, slowInp, signalInp)
+plotHist1 = plot(showHisto ? hist * 2 : na, title = 'MACD Histogram (x2)', style = plot.style_columns, color = hist > 0 ? color.new(color.lime, 20) : hist < 0 ? color.new(color.red, 20) : color.new(color.black, 100))
+plotMacd = plot(macdLine, title = 'MACD Line', color = color.white, linewidth = 2)
+plotSig = plot(signalLine, title = 'Signal Line', color = color.yellow, linewidth = 2)
+fill(plotMacd, plotSig, color = macdLine > signalLine ? color.new(color.yellow, 60) : color.new(color.fuchsia, 60))
+
+// ── Magic-9 Sequence (V1, streak counters; unchanged) ──
+condUp = macdLine > macdLine[3]
+condDn = macdLine < macdLine[3]
+
+var int runUp = 0
+var int runDn = 0
+runUp := condUp ? nz(runUp[1], 0) + 1 : 0
+runDn := condDn ? nz(runDn[1], 0) + 1 : 0
+
+seqHitA = runUp == 3 or runDn == 3
+seqHitB = runUp == 5 or runDn == 5
+seqHitC = runUp == 7 or runDn == 7
+waveUp = runUp
+waveDn = runDn
+
+if presetInp != 'Custom (incl 3-5)'
+    seqHitA := false
+    seqHitB := false
+
+// Streaks used for 9/13 tradable completions
+highSig = runUp == seqSigInp
+lowSig = runDn == seqSigInp
+highExt = runUp == seqExtInp
+lowExt = runDn == seqExtInp
+
+anySeqNowUp = seqHitA or seqHitB or seqHitC or highExt or highSig
+anySeqNowDn = seqHitA or seqHitB or seqHitC or lowExt or lowSig
+anySeqPrevUp = seqHitA[1] or seqHitB[1] or seqHitC[1] or highExt[1] or highSig[1]
+anySeqPrevDn = seqHitA[1] or seqHitB[1] or seqHitC[1] or lowExt[1] or lowSig[1]
+
+plotchar(seqHitC, '7', location = location.top, color = color.new(color.green, 50), size = size.tiny)
+plotchar(crossUpSetup and useEdge, 'S', location = location.abovebar, color = color.new(color.fuchsia, 0), size = size.tiny)
+
+// ── Magic-9 Setup confirmation state ──
+int upCount = 0
+int downCount = 0
+for i = 0 to lengthInp - 1
+    float vNow = macdLine[i]
+    float vRef = macdLine[i + lengthInp]
+    if not na(vNow) and not na(vRef)
+        upCount += vNow > vRef ? 1 : 0
+        downCount += vNow < vRef ? 1 : 0
+magic9Setup = downCount == lengthInp ? 1 : upCount == lengthInp ? -1 : 0
+
+// State transitions of the confirmation state (hoisted globally for v6 consistency)
+crossUpSetup = ta.crossover(magic9Setup, 0)
+crossDnSetup = ta.crossunder(magic9Setup, 0)
+
+plotchar(crossUpSetup, '▲', location = location.belowbar, color = color.new(color.blue, 0), size = size.tiny)
+plotchar(crossDnSetup, '▼', location = location.abovebar, color = color.new(color.yellow, 0), size = size.tiny)
+
+// ── Higher timeframe filter (slope of the HTF MACD line) ──
+htfDelta = request.security(syminfo.tickerid, htfTf, macdLine[1] - macdLine[2], barmerge.gaps_off, barmerge.lookahead_on)
+
+// ── Occurrence helper ──
+occurredWithin = (bar_index, lookback) => bar_index < lookback ? false : ta.barssince(crossDnSetup) < lookback
+occurredWithinUp = (lookback) => bar_index < lookback ? false : ta.barssince(crossUpSetup) < lookback
+
+occurredIn(cond, win) =>
+    // occurrences of `cond` within the last `win` bars (including the current bar).
+    bool s = false
+    for i = 0 to win - 1
+        s := s or (not na(cond[i]) and cond[i])
+    s
+
+// ── Raw signal logic (any branch: V1-style) ──
+rawBuy = ((occurredIn(crossUpSetup, winSigInp) and lowSig) or (occurredIn(crossUpSetup, winExtInp) and lowExt) or (occurredIn(crossUpSetup, winAnyInp) and anySeqPrevDn and not anySeqNowDn)) and (not useHTFFilter or htfDelta > 0)
+rawSell = ((occurredIn(crossDnSetup, winSigInp) and highSig) or (occurredIn(crossDnSetup, winExtInp) and highExt) or (occurredIn(crossDnSetup, winAnyInp) and anySeqPrevUp and not anySeqNowUp)) and (not useHTFFilter or htfDelta < 0)
+
+// ── Signal governance (edge / exclusivity / cooldown) ──
+var int posState = 0
+var int lastSignalBar = na
+var int entryDir = 0
+var bool lastBuy = false
+
+buyEdge = useEdge ? rawBuy and not rawBuy[1] : rawBuy
+sellEdge = useEdge ? rawSell and not rawSell[1] : rawSell
+
+var int sigDir = 0
+sigDir := sellEdge ? -1 : buyEdge ? 1 : 0
+
+crossUnderRaw = ta.crossunder(macdLine, signalLine)
+crossOverRaw = ta.crossover(macdLine, signalLine)
+
+cooldownOK = na(lastSignalBar) or bar_index - lastSignalBar > cooldownBars
+
+rawLongEntry = buyEdge and posState <= 0 and cooldownOK
+rawShortEntry = sellEdge and posState >= 0 and cooldownOK
+rawLongExit = (crossUnderRaw or (useExitOnFlip and crossDnSetup)) and posState == 1
+rawShortExit = (crossOverRaw or (useExitOnFlip and crossUpSetup)) and posState == -1
+
+longExit = useExclusivity ? rawLongExit and not rawLongEntry and not rawShortEntry : rawLongExit
+shortExit = useExclusivity ? rawShortExit and not rawLongEntry and not rawShortEntry : rawShortExit
+longEntry = useExclusivity ? rawLongEntry and not longExit and not shortExit : rawLongEntry
+shortEntry = useExclusivity ? rawShortEntry and not longExit and not shortExit : rawShortEntry
+
+// ── Anchors for re-entry (RL/RS) ──
+var float exitHighAnchor = na
+var float exitLowAnchor = na
+var bool reentryArmed = false
+var int exitAge = na
+
+anchorHi = ta.highest(macdLine, reentryWin * 2 + 1)
+anchorLo = ta.lowest(macdLine, reentryWin * 2 + 1)
+rlRaw = ta.crossover(macdLine, nz(exitHighAnchor, 1000000000.0))
+rsRaw = ta.crossunder(macdLine, nz(exitLowAnchor, -1000000000.0))
+
+exitAge := na(exitAge) ? na : exitAge + 1
+if longExit or shortExit
+    exitAge := 0
+    reentryArmed := true
+if not na(exitAge) and exitAge == reentryWin
+    exitHighAnchor := na
+    exitLowAnchor := na
+if not na(exitAge) and exitAge == reentryWin + 1 and reentryArmed
+    exitHighAnchor := anchorHi
+    exitLowAnchor := anchorLo
+
+RL = false
+RS = false
+if useReentry and reentryArmed and not na(exitHighAnchor) and not na(exitLowAnchor)
+    RL := rlRaw
+    RS := rsRaw
+
+longEntryFinal = longEntry or RL
+shortEntryFinal = shortEntry or RS
+
+if longEntryFinal or shortEntryFinal or longExit or shortExit
+    lastSignalBar := bar_index
+
+var float entryPrice = na
+if longEntryFinal
+    posState := 1
+    entryDir := 1
+    entryPrice := close
+    reentryArmed := false
+    lastBuy := true
+else if shortEntryFinal
+    posState := -1
+    entryDir := -1
+    entryPrice := close
+    reentryArmed := false
+    lastBuy := false
+else if longExit or shortExit
+    posState := 0
+    entryDir := 0
+    entryPrice := na
+
+// ── ATR TP/SL reference levels ──
+atrVal = ta.atr(atrLen)
+float slPrice = useTPSL and posState != 0 and not na(entryPrice) ? entryPrice - entryDir * slMult * atrVal : na
+float tpPrice = useTPSL and posState != 0 and not na(entryPrice) ? entryPrice + entryDir * tpMult * atrVal : na
+plot(slPrice, title = 'Stop Loss (price)', color = color.new(color.red, 0), style = plot.style_linebr, display = display.data_window)
+plot(tpPrice, title = 'Take Profit (price)', color = color.new(color.teal, 0), style = plot.style_linebr, display = display.data_window)
+
+// ── Labels ──
+if longEntryFinal or shortEntryFinal
+    label.new(bar_index, macdLine, longEntryFinal ? (RL ? 'RL' : 'Buy') : (RS ? 'RS' : 'Sell'), color = longEntryFinal ? C_LONG : C_SHORT, textcolor = color.white, style = longEntryFinal ? label.style_label_up : label.style_label_down, yloc = yloc.price, size = size.small)
+if longExit or shortExit
+    label.new(bar_index, macdLine, longExit ? 'XL' : 'XS', color = C_EXIT, textcolor = color.white, style = label.style_xcross, yloc = yloc.price, size = size.tiny)
+
+bgcolor(posState == 1 ? C_BGLONG : posState == -1 ? C_BGSHORT : color(na))
+
+var table dash = table.new(position.top_right, 2, 6, bgcolor = color.new(color.black, 60), border_width = 1, border_color = color.new(color.gray, 60))
+if showDash and barstate.islast
+    table.cell(dash, 0, 0, 'Position', text_color = color.white, text_size = size.tiny)
+    table.cell(dash, 1, 0, posState == 1 ? 'LONG' : posState == -1 ? 'SHORT' : 'FLAT', text_color = posState == 1 ? color.lime : posState == -1 ? color.red : color.gray, text_size = size.tiny)
+    table.cell(dash, 0, 1, 'Last Signal', text_color = color.white, text_size = size.tiny)
+    table.cell(dash, 1, 1, RL ? 'RL' : RS ? 'RS' : longEntryFinal ? 'BUY' : shortEntryFinal ? 'SELL' : posState == 1 ? 'LONG' : posState == -1 ? 'SHORT' : 'FLAT', text_color = color.white, text_size = size.tiny)
+    table.cell(dash, 0, 2, 'MACD', text_color = color.white, text_size = size.tiny)
+    table.cell(dash, 1, 2, str.tostring(macdLine, '#.##'), text_color = macdLine > 0 ? color.lime : color.red, text_size = size.tiny)
+    table.cell(dash, 0, 3, 'Run Up / Dn', text_color = color.white, text_size = size.tiny)
+    table.cell(dash, 1, 3, str.tostring(runUp) + ' / ' + str.tostring(runDn), text_color = color.white, text_size = size.tiny)
+    table.cell(dash, 0, 4, 'TP / SL', text_color = color.white, text_size = size.tiny)
+    table.cell(dash, 1, 4, useTPSL and posState != 0 ? str.tostring(tpPrice, format.mintick) + ' / ' + str.tostring(slPrice, format.mintick) : '—', text_color = color.white, text_size = size.tiny)
+    table.cell(dash, 0, 5, 'HTF Delta', text_color = color.white, text_size = size.tiny)
+    table.cell(dash, 1, 5, useHTFFilter ? (na(htfDelta) ? 'n/a' : str.tostring(htfDelta, '#.##')) : 'OFF', text_color = useHTFFilter ? (htfDelta > 0 ? color.lime : htfDelta < 0 ? color.red : color.gray) : color.gray, text_size = size.tiny)
+
+// ── Alerts ──
+alertcondition(longEntry, title = 'Long Entry', message = 'Magic-9 MACD long entry @ {{close}}')
+alertcondition(shortEntry, title = 'Short Entry', message = 'Magic-9 MACD short entry @ {{close}}')
+alertcondition(longExit, title = 'Long Exit', message = 'Magic-9 MACD long exit @ {{close}}')
+alertcondition(shortExit, title = 'Short Exit', message = 'Magic-9 MACD short exit @ {{close}}')
+alertcondition(RL, title = 'Re-entry Long', message = 'Magic-9 MACD re-entry long @ {{close}}')
+alertcondition(RS, title = 'Re-entry Short', message = 'Magic-9 MACD re-entry short @ {{close}}')
+
+if longEntry
+    alert('Magic-9 MACD LONG entry @ ' + str.tostring(close, format.mintick) + (useTPSL ? ' | SL ' + str.tostring(slPrice, format.mintick) + ' | TP ' + str.tostring(tpPrice, format.mintick) : ''), alert.freq_once_per_bar_close)
+if shortEntry
+    alert('Magic-9 MACD SHORT entry @ ' + str.tostring(close, format.mintick) + (useTPSL ? ' | SL ' + str.tostring(slPrice, format.mintick) + ' | TP ' + str.tostring(tpPrice, format.mintick) : ''), alert.freq_once_per_bar_close)
+if longExit
+    alert('Magic-9 MACD LONG exit @ ' + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+if shortExit
+    alert('Magic-9 MACD SHORT exit @ ' + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+if RL
+    alert('Magic-9 MACD RE-ENTRY LONG @ ' + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+if RS
+    alert('Magic-9 MACD RE-ENTRY SHORT @ ' + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
